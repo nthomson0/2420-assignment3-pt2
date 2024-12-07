@@ -1,5 +1,5 @@
-# Utlizing nginx and Services to Deploy Web Pages
-In this tutorial I will go over the basics of systemd services and timers, nginx, and ufw. Using these tools we will be deploying a web page that is created from a script run by a service and timer.
+# Utlizing nginx and Services to Deploy Web Pages and a Load Balancer
+In this tutorial I will go over the basics of systemd services and timers, nginx, ufw, and using a load balancer. Using these tools we will be deploying a web page that is created from a script run by a service and timer.
 
 # Step 1: Creating a System User
 We will start by creating a system user named `webgen`, their home directory will be set to `/var/lib/webgen`, and we will also give them a specific login shell for system users.
@@ -18,14 +18,21 @@ Now lets add some directories and files to webgen's home. Run the following comm
 
 `sudo mkdir /var/lib/webgen/bin`
 `sudo mkdir /var/lib/webgen/HTML`
+`sudo mkdir /var/lib/webgen/documents`
 `sudo touch /var/lib/webgen/bin/generate_index`
 `sudo touch /var/lib/webgen/HTML/index.html`
+`sudo touch /var/lib/webgen/documents/file-one`
+`sudo touch /var/lib/webgen/documents/file-one`
 
 Your directory structure should now look like this:
 ```
 /var/lib/webgen/
 |-- bin/
 |    |-- generate_index
+|
+|-- documents/
+|    |-- file-one
+|    |-- file-two
 |
 |-- HTML/
      |-- index.html
@@ -45,6 +52,7 @@ KERNEL_RELEASE=$(uname -r)
 OS_NAME=$(grep '^PRETTY_NAME' /etc/os-release | cut -d '=' -f2 | tr -d '"')
 DATE=$(date +"%d/%m/%Y")
 PACKAGE_COUNT=$(pacman -Q | wc -l)
+PUBLIC_IP_ADRESS=$(ip -4 a show dev eth0 | grep inet | awk '{print $2}' | cut -d/ -f1)
 OUTPUT_DIR="/var/lib/webgen/HTML"
 OUTPUT_FILE="$OUTPUT_DIR/index.html"
 
@@ -69,6 +77,8 @@ cat <<EOF > "$OUTPUT_FILE"
     <p><strong>Operating System:</strong> $OS_NAME</p>
     <p><strong>Date:</strong> $DATE</p>
     <p><strong>Number of Installed Packages:</strong> $PACKAGE_COUNT</p>
+    <p><strong>Public IP address of server:</strong> $PUBLIC_IP_ADRESS</p>
+    <p><a href="/documents">File Server</a></p>
 </body>
 </html>
 EOF
@@ -194,8 +204,15 @@ server {
         root /var/lib/webgen/HTML; # Root directory for our html files
         index index.html; # index html file within the root dir
 
-                location / { # When routed to index do the following:
+        location / { # When routed to index do the following:
                 try_files $uri $uri/ =404; # try matching files, if nothing found error 404
+        }
+
+        location /documents {
+                root /var/lib/webgen/;
+                autoindex on;
+                autoindex_exact_size off;
+                autoindex_localtime on;
         }
 }
 ```
@@ -253,91 +270,37 @@ Tip: You can get your ip address by using `ip -4 addr` and it should be under `e
 
 Note: If you type in your ip address and it auto completes in the url line it may try to connect via https. We have no allowed https so in that case you will not be able to access your site.
 
-# Step 5: Improving our site
-Our site contains some pretty rudimentary information about our system. Here we will make an attempt to add some more information to our site.
+# Step 5: Setting up a Second Droplet
+Now that we have a working web server, we need to create a secondary droplet with the same steps. We will be using it in step 6 under a load balancer with our existing droplet.
 
-First lets install the package `inxi` as it will allow us to output a bunch of system hardware information using a single package and simply:
-`sudo pacman -S inxi`
+My recommendation would be to create a new droplet (it is assumed you know how to do this) and to clone this repository to the new droplet to retrieve the files to repeat the process. Once thats done just make sure you go through the steps again to setup the web server like you've done before.
 
-Next we will be adding the following commands to our script:
-- `inxi --cpu` returns information about the system's CPU.
-- `inxi --disk` returns information about the system's storage.
-- `inxi -G` returns information about the system's GPU.
-- `inxi --memory` returns information about the system's memory.
-- `inxi --weather` returns information about the weather where the system locale is set.
+Once you have another working server on your new droplet you can proceed to the next step.
 
-Open up your script using `sudo nvim /var/lib/webgen/bin/generate_index` and edit it to include the commands we just looked at:
+# Step 6: Setting up a Load Balancer
+A load balancer is usually used on web servers to split up traffic to ensure the *load* is *balanced* across our servers. It's especially useful for ensuring the site is always available, such as if one of our droplets was offline users could still access the site via the other. Another benefit is being able to deploy changes more gradually by enabling changes on one of our droplets and not the other all at once.
 
-```
-#!/bin/bash
+Before we can activate a load balancer we just need to tag our nginx server droplets so it can recognize them. You can do this by simply navigating to the droplet settings page for each one and adding a tag. I used the tag "web" for both.
 
-set -euo pipefail
+Now we can start navigating to our digital ocean site to initialize a load balancer:
 
-# this is the generate_index script
-# you shouldn't have to edit this script
+1. Click the project which contains both your nginx server droplets.
+2. Click the "spin up a load balancer" button.
+3. Run through the settings for your load balancer.
+All settings can be left as default except, change region to SFO3 or your closest server. Set the tag to "web" or whatever you set to your droplets.
+4. Activate the load balancer at the bottom.
 
-# Variables
-KERNEL_RELEASE=$(uname -r)
-OS_NAME=$(grep '^PRETTY_NAME' /etc/os-release | cut -d '=' -f2 | tr -d '"')
-DATE=$(date +"%d/%m/%Y")
-PACKAGE_COUNT=$(pacman -Q | wc -l)
-CPU=$(inxi --cpu)
-GPU=$(inxi -G)
-HDD=$(inxi --disk)
-MEM=$(inxi --memory)
-WEATHER=$(inxi --weather)
-OUTPUT_DIR="/var/lib/webgen/HTML"
-OUTPUT_FILE="$OUTPUT_DIR/index.html"
+Now that we've done that, we can just wait for the load balancer to initialize. Once it's done we should be able to navigate to the IP address specified by the load balancer and it should direct us to one of our two droplets.
 
-# Ensure the target directory exists
-if [[ ! -d "$OUTPUT_DIR" ]]; then
-    echo "Error: Failed to create or access directory $OUTPUT_DIR." >&2
-    exit 1
-fi
+![load balancer](./images/load_balancer.png)
 
-# Create the index.html file
-cat <<EOF > "$OUTPUT_FILE"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>System Information</title>
-</head>
-<body>
-    <h1>System Information</h1>
-    <p><strong>Kernel Release:</strong> $KERNEL_RELEASE</p>
-    <p><strong>Operating System:</strong> $OS_NAME</p>
-    <p><strong>Date:</strong> $DATE</p>
-    <p><strong>Number of Installed Packages:</strong> $PACKAGE_COUNT</p>
-    <p><strong>CPU:</strong></p>
-    <p>$CPU</p>
-    <p><strong>GPU:</strong></p>
-    <p>$GPU</p>
-    <p><strong>Memory:</strong></p>
-    <p>$MEM</p>
-    <p><strong>Storage:</strong></p>
-    <p>$HDD</p>
-    <p><strong>Weather at server location:</strong></p>
-    <p>$WEATHER</p>
-</body>
-</html>
-EOF
+Since we wrote our IPv4 into the generate-index script, we can refresh the page and we should eventually be viewing our secondary droplet.
 
-# Check if the file was created successfully
-if [ $? -eq 0 ]; then
-    echo "Success: File created at $OUTPUT_FILE."
-else
-    echo "Error: Failed to create the file at $OUTPUT_FILE." >&2
-    exit 1
-fi
-```
+Additionally, if you click the hyperlink to the file server, or simply navigate to `<IP ADDRESS>/documents` you should be able to view the files we created.
 
-Now all you should need to do is run `sudo systemctl start generate-index.service` and refresh your webpage. The results should look like this:
+![documents page](./images/documents.png)
 
-![improved index](./images/index_improved.png)
-
-It's not perfect and a lot of the formatting seems to break but we can still get a lot of information out of here including the weather!
+I recommend appending different text within each file in both droplets so when you download them you're able to see that the load balancer is functioning as intended.
 
 # References
 
